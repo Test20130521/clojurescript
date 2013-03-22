@@ -1,32 +1,20 @@
 (ns cljs.repl.reflect
   (:refer-clojure :exclude [macroexpand])
-  (:require [cljs.repl.server :as server]
-            [cljs.analyzer :as analyzer]
+  (:require [cljs.analyzer :as analyzer]
             [cljs.compiler :as compiler]
             [clojure.string :as str]
             [clojure.pprint :as pprint]))
-
-(defn- dissoc-unless
-  "Dissoc all keys from map that do not appear in key-set.
-
-    (dissoc-unless {:foo 1 :bar 2} #{:foo})
-    => {:foo 1}"
-  [m key-set]
-  {:pre [(map? m)
-         (set? key-set)]}
-  (reduce (fn [coll key]
-            (if (contains? key-set key)
-              coll
-              (dissoc coll key)))
-          m (keys m)))
 
 (defn- get-meta [sym]
   (let [ns (symbol (namespace sym))
         n  (symbol (name sym))]
     (if-let [sym-meta (get (:defs (get @analyzer/namespaces ns)) n)]
-      (-> (dissoc-unless sym-meta
-                         #{:name :method-params :doc :line :file})
+      (-> (select-keys sym-meta #{:name :method-params :doc :line :file})
           (update-in [:name] str)
+          ; TODO not clear on why we need to stringify the method params;
+          ; not doing so yields an exception browser-side when evaluating the
+          ; compiled javascript. Stuck with read-string'ing :method-params when
+          ; we print docs in cljs.repl.browser.reflect for now.
           (update-in [:method-params] #(str (vec %)))))))
 
 (defn macroexpand [form]
@@ -34,42 +22,35 @@
   (let [mform (analyzer/macroexpand-1 {} form)]
     (if (identical? form mform)
       mform
-      (macroexpand mform))))
+      (recur mform))))
 
-(defn- url-decode [encoded & [encoding]]
-  (java.net.URLDecoder/decode encoded (or encoding "UTF-8")))
-
-(def read-url-string (comp read-string url-decode))
-
-(defn parse-param
-  "Parses the query parameter of a path of the form \"/reflect?var=foo\"
-  into the vector [\"var\" \"foo\"]."
-  [path]
-  (-> (str/split path #"\?")
-      (last)
-      (str/split #"=")))
+(defn- read-url-string
+  [s]
+  (read-string (java.net.URLDecoder/decode s "UTF-8")))
 
 (defn- compile-and-return
   "Compiles a form to javascript and returns it on conn."
-  [conn form]
+  [req form]
   (let [ast (analyzer/analyze {:ns {:name 'cljs.user}} form)
         js  (try (compiler/emit-str ast)
                  (catch Exception e (println e)))]
-    (server/send-and-close conn 200 js "text/javascript")))
+    (#'cljs.repl.browser/send-response req 200 js :content-type "text/javascript")))
 
-(defmulti handle-reflect-query (fn [[param _] & _] param))
+(defn- request-params
+  [req]
+  (apply hash-map (-> req .getRequestURI .getRawQuery (str/split #"="))))
 
-(defmethod handle-reflect-query "var"
-  [[_ sym] req conn opts]
-  (let [sym (read-url-string sym)]
-    (compile-and-return conn (get-meta sym))))
+; cljs.repl.browser implicitly loads this ns; yeah, I know, I'm a bad person,
+; but these tools do zero good if they're not loaded, and it's too late if
+; you've already turned your REPL into a browser-repl (unless you have multiple
+; REPL sessions....)
+(defmethod @#'cljs.repl.browser/handle-get "/reflect/macroexpand"
+  [{:keys [http-exchange session-id]}]
+  (let [mform (-> http-exchange request-params (get "form") read-url-string macroexpand)]
+    (#'cljs.repl.browser/send-response http-exchange 200 (with-out-str (pprint/pprint mform)))))
 
-(defmethod handle-reflect-query "macroform"
-  [[_ mform] req conn opts]
-  (let [mform (-> mform read-url-string macroexpand)]
-    (server/send-and-close conn 200 (with-out-str (pprint/pprint mform)))))
+(defmethod @#'cljs.repl.browser/handle-get "/reflect/var-meta"
+  [{:keys [http-exchange session-id]}]
+  (let [meta (-> http-exchange request-params (get "var") read-url-string get-meta)]
+    (compile-and-return http-exchange meta)))
 
-(server/dispatch-on :get
-                    (fn [{:keys [path]} _ _] (.startsWith path "/reflect"))
-                    (fn [{:keys [path] :as req} conn opts]
-                      (handle-reflect-query (parse-param path) req conn opts)))

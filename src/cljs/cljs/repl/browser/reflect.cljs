@@ -1,7 +1,9 @@
-(ns clojure.reflect
+(ns cljs.repl.browser.reflect
   (:refer-clojure :exclude [meta])
   (:require [clojure.browser.net :as net]
-            [clojure.browser.event :as event]))
+            [clojure.browser.event :as event]
+            [clojure.browser.repl :as repl]
+            [cljs.reader :as reader]))
 
 (defn- evaluate-javascript [block]
   (let [result (try (js* "eval(~{block})")
@@ -10,11 +12,14 @@
     result))
 
 (defn- query-reflection
-  "Issues a GET to /reflect with a single query-parameter string.
-  Calls cb with the result."
-  [query-param cb]
+  "Issues a GET to /reflect/[req-type] with a query string determined by the
+  [params] map.  Calls cb with the result."
+  [req-type params cb]
   (let [conn (net/xhr-connection)
-        url  (str "/reflect?" query-param)]
+        url (->> (map (fn [[k v]] [k "=" (js/encodeURIComponent v)]) params)
+                 (interpose "&")
+                 flatten
+                 (apply str (repl/base-url) "/reflect/" req-type "?"))]
     (event/listen conn :success (fn [e]
                                   (let [resp (.getResponseText e/currentTarget ())]
                                     (cb resp))))
@@ -26,20 +31,21 @@
   callback fn cb with the evaluated cljs map containing that symbol's
   meta information."
   [sym cb]
-  (query-reflection (str "var=" (js/encodeURIComponent (str sym)))
+  (query-reflection "var-meta" {"var" (str sym)}
                     #(cb (evaluate-javascript %))))
 
 (defn macroexpand
   "Queries the reflection api with a quoted macro form, then calls the
   callback function with the macroexpanded form, as a string."
   [form]
-  (query-reflection (str "macroform=" (js/encodeURIComponent (str form))) println))
+  (query-reflection "macroexpand" {"form" (str form)} println))
 
 (defn print-doc [{:keys [name method-params doc]}]
   (when-not (empty? name)
+    (println "-------------------------")
     (println name)
-    (println method-params)
-    (println doc)))
+    (println (pr-str (map (partial mapv :name) (reader/read-string method-params))))
+    (println " " doc)))
 
 (defn doc
   "Queries the reflection api with a fully qualified symbol, then prints

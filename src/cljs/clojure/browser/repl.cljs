@@ -16,9 +16,17 @@
       :author "Bobby Calderwood and Alex Redington"}
   clojure.browser.repl
   (:require [clojure.browser.net   :as net]
-            [clojure.browser.event :as event]))
+            [clojure.browser.event :as event]
+            [clojure.string        :as str]))
 
 (def xpc-connection (atom nil))
+
+(defn base-url
+  "Returns the 'base' URL of the remote ClojureScript compiler's server, with
+  any per-request paths stripped."
+  []
+  (-> js/window .-location str
+      (str/replace #"(/repl)(.+)" (fn [_ lookbehind & _] lookbehind))))
 
 (defn repl-print [data]
   (if-let [conn @xpc-connection]
